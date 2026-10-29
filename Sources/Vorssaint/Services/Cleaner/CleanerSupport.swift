@@ -16,6 +16,7 @@ enum CleanerSupport {
     /// end: the raw value is a stable identity.
     enum Category: Int, CaseIterable, Identifiable {
         case leftovers, loginItems, caches, logs, developer, trash, deviceBackups, screenshots
+        case launchCopies
 
         var id: Int { rawValue }
     }
@@ -418,6 +419,67 @@ enum CleanerSupport {
         guard days > 0 else { return false }
         let latest = [created, modified, lastUsed].compactMap { $0 }.max() ?? created
         return now.timeIntervalSince(latest) >= TimeInterval(days) * 86_400
+    }
+
+    // MARK: Browser launch copies
+
+    /// Chromium browsers copy their app into the per-user `X` folder at
+    /// launch, so an update cannot change the bundle under the running
+    /// browser, and remove the copy only when they quit normally. A crash, a
+    /// forced quit or a logout leaves it there for good (#3612).
+    static let launchCopyFolderSuffix = ".code_sign_clone"
+    static let launchCopyPrefix = "code_sign_clone."
+
+    /// `root/<bundle id>.code_sign_clone/code_sign_clone.XXXXXX` and nothing
+    /// above or below it.
+    static func isLaunchCopy(_ path: String, root: String) -> Bool {
+        let parent = (path as NSString).deletingLastPathComponent
+        let owner = (parent as NSString).lastPathComponent
+        return (parent as NSString).deletingLastPathComponent == root
+            && owner.hasSuffix(launchCopyFolderSuffix) && owner.count > launchCopyFolderSuffix.count
+            && (path as NSString).lastPathComponent.hasPrefix(launchCopyPrefix)
+            && (path as NSString).lastPathComponent.count > launchCopyPrefix.count
+    }
+
+    /// The bundle identifier of the browser a copy belongs to.
+    static func launchCopyOwner(_ path: String) -> String {
+        let folder = ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent
+        return String(folder.dropLast(launchCopyFolderSuffix.count))
+    }
+
+    /// A running browser executes from its copy, which is the one thing that
+    /// tells it apart: its app reports the bundle in Applications, and the
+    /// newest copy is not necessarily the one in use. The kernel spells the
+    /// path under /private, the temporary folder's own path does not.
+    static func launchCopyInUse(_ path: String, executablePaths: [String]) -> Bool {
+        let spellings = path.hasPrefix("/private/") ? [path, String(path.dropFirst("/private".count))]
+                                                    : [path, "/private" + path]
+        return executablePaths.contains { executable in
+            spellings.contains { executable.hasPrefix($0 + "/") }
+        }
+    }
+
+    struct LaunchCopy: Equatable {
+        let owner: String
+        let version: String?
+        let allocated: Int64
+        /// Blocks no other file shares.
+        let exclusive: Int64
+    }
+
+    /// What removing each copy frees, as far as it can be told. Copies are
+    /// APFS clones: one of the installed version shares its blocks with the
+    /// app in Applications and frees about nothing, and copies of one older
+    /// version share theirs with each other, so that version is counted once,
+    /// on its first copy. A copy of unknown version counts only what it holds
+    /// alone, which may be less than it frees but never more.
+    static func launchCopySizes(_ copies: [LaunchCopy], installedVersions: [String: String]) -> [Int64] {
+        var counted = Set<String>()
+        return copies.map { copy in
+            guard let version = copy.version, installedVersions[copy.owner] != version,
+                  counted.insert(copy.owner + "|" + version).inserted else { return copy.exclusive }
+            return copy.allocated
+        }
     }
 
 }

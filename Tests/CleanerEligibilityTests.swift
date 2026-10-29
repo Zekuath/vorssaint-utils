@@ -34,6 +34,11 @@ enum CleanerEligibilityTests {
     }
 
     static var screenshotFolder: URL?
+    // The real ones read this Mac's temporary folder and processes.
+    static var launchCopyFixture: String?
+    static var runningExecutables: [String] = []
+    static func launchCopyRoot() -> String? { launchCopyFixture }
+    static func runningExecutablePaths() -> [String] { runningExecutables }
     static func isScreenshotFolderChild(_ url: URL) -> Bool {
         screenshotFolder.map { CleanerSupport.isDirectChild(url, of: $0) } ?? false
     }
@@ -183,6 +188,60 @@ enum CleanerEligibilityTests {
                      "a file that no longer proves it is a capture is never removed")
     }
 
+    /// Copies of one browser as Chromium leaves them (#3612): one the running
+    /// browser executes from, two of an old version, each an APFS clone.
+    static func runLaunchCopies(_ suite: TestSuite, root: URL) throws {
+        let manager = FileManager.default
+        let x = root.appendingPathComponent("X", isDirectory: true)
+        let owner = x.appendingPathComponent("com.example.Browser.code_sign_clone", isDirectory: true)
+        launchCopyFixture = x.path
+        defer { launchCopyFixture = nil; runningExecutables = [] }
+        let original = root.appendingPathComponent("Original.bin")
+        try Data((0..<600_000).map { UInt8(truncatingIfNeeded: $0 &* 31) }).write(to: original)
+        func copy(_ name: String, created: Date) throws -> URL {
+            let url = owner.appendingPathComponent("code_sign_clone." + name, isDirectory: true)
+            let contents = url.appendingPathComponent("Browser.app.bundle/Contents", isDirectory: true)
+            try manager.createDirectory(at: contents.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
+            try PropertyListSerialization.data(fromPropertyList: ["CFBundleName": "Browser",
+                                                                  "CFBundleShortVersionString": "9.1"],
+                                               format: .xml, options: 0)
+                .write(to: contents.appendingPathComponent("Info.plist"))
+            // copyItem clones on APFS, so the copies share their blocks.
+            try manager.copyItem(at: original, to: contents.appendingPathComponent("MacOS/Browser"))
+            try manager.setAttributes([.creationDate: created], ofItemAtPath: url.path)
+            return url
+        }
+        let older = try copy("aaaaaa", created: Date(timeIntervalSinceNow: -7_200))
+        let newer = try copy("bbbbbb", created: Date(timeIntervalSinceNow: -3_600))
+        let inUse = try copy("cccccc", created: Date(timeIntervalSinceNow: -10_800))
+        try manager.createDirectory(at: owner.appendingPathComponent("unrelated"), withIntermediateDirectories: true)
+        runningExecutables = ["/private" + inUse.path + "/Browser.app.bundle/Contents/MacOS/Browser"]
+
+        let found = scanLaunchCopies()
+        suite.expect(found.map(\.url.path) == [older.path, newer.path]
+                && found.allSatisfy { $0.category == .launchCopies && $0.recommended && $0.detail == "Browser 9.1" },
+               "leftover launch copies are listed oldest first, without the one a browser runs from")
+        suite.expect(found.first?.size ?? 0 > 500_000 && (found.last?.size ?? 1) < found.first?.size ?? 0,
+               "copies sharing one version count it once instead of once per copy: \(found.map(\.size))")
+        suite.expect(canRemove(Item(url: older, category: .launchCopies, detail: "")),
+               "a leftover launch copy can be moved to the Trash")
+        suite.expect(!canRemove(Item(url: inUse, category: .launchCopies, detail: "")),
+               "the copy a running browser executes from is never removed, under either spelling of its path")
+        runningExecutables = [older.path + "/Browser.app.bundle/Contents/MacOS/Browser"]
+        suite.expect(!canRemove(Item(url: older, category: .launchCopies, detail: "")),
+               "a browser launched from a copy after the scan keeps it")
+        suite.expect(!canRemove(Item(url: owner, category: .launchCopies, detail: ""))
+                && !canRemove(Item(url: owner.appendingPathComponent("unrelated"), category: .launchCopies, detail: "")),
+               "only a copy itself is ever removed, never its browser's folder or anything else in it")
+        let unique = root.appendingPathComponent("Unique", isDirectory: true)
+        try manager.createDirectory(at: unique, withIntermediateDirectories: true)
+        try Data((0..<600_000).map { UInt8(truncatingIfNeeded: $0 &* 17) }).write(to: unique.appendingPathComponent("data"))
+        let alone = exclusiveSize(of: unique, fm: manager)
+        try manager.copyItem(at: unique.appendingPathComponent("data"), to: unique.appendingPathComponent("clone"))
+        suite.expect(alone >= 600_000 && exclusiveSize(of: unique, fm: manager) < alone,
+               "a file's own blocks count until a clone shares them: \(alone)")
+    }
+
     static func run(_ suite: TestSuite) {
         let manager = FileManager.default
         let root = manager.temporaryDirectory.resolvingSymlinksInPath()
@@ -248,6 +307,7 @@ enum CleanerEligibilityTests {
 
             runScreenshotRules(suite)
             try runScreenshotScan(suite, root: root)
+            try runLaunchCopies(suite, root: root)
         } catch {
             suite.expect(false, "cleaner eligibility fixture failed: \(error)")
         }
