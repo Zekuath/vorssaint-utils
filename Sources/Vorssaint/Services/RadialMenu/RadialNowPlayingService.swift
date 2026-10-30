@@ -234,8 +234,11 @@ private struct RadialNowPlayingCard: View {
 }
 
 enum RadialNowPlayingApplication {
+    /// Keyed by player process, so a long session meets a new key with every
+    /// player relaunch. Cleared when it grows, as the music page's own list is.
     private static var icons: [String: NSImage] = [:]
     private static var missingIcons = Set<String>()
+    private static let cacheLimit = 16
 
     static func runningApplication(for snapshot: RadialNowPlayingSnapshot) -> NSRunningApplication? {
         playerApplication(bundleIdentifier: snapshot.appBundleIdentifier, pid: snapshot.appPID)
@@ -276,6 +279,10 @@ enum RadialNowPlayingApplication {
             icon = NSWorkspace.shared.icon(forFile: url.path)
         } else {
             icon = nil
+        }
+        if icons.count + missingIcons.count >= cacheLimit {
+            icons.removeAll()
+            missingIcons.removeAll()
         }
         if let icon {
             icons[key] = icon
