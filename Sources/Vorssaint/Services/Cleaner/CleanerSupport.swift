@@ -447,16 +447,31 @@ enum CleanerSupport {
         return String(folder.dropLast(launchCopyFolderSuffix.count))
     }
 
-    /// A running browser executes from its copy, which is the one thing that
-    /// tells it apart: its app reports the bundle in Applications, and the
-    /// newest copy is not necessarily the one in use. The kernel spells the
-    /// path under /private, the temporary folder's own path does not.
+    /// A running browser executes from its copy, but the kernel names that
+    /// executable by the copy's path only some of the time: the copy is a
+    /// clone of the app in Applications and the lookup may answer with
+    /// either. A match here is certain, a miss proves nothing, so
+    /// `launchCopyMayBelongToRunningBrowser` has the last word. The kernel
+    /// spells the path under /private, the temporary folder's own path does
+    /// not.
     static func launchCopyInUse(_ path: String, executablePaths: [String]) -> Bool {
         let spellings = path.hasPrefix("/private/") ? [path, String(path.dropFirst("/private".count))]
                                                     : [path, "/private" + path]
         return executablePaths.contains { executable in
             spellings.contains { executable.hasPrefix($0 + "/") }
         }
+    }
+
+    /// A browser makes a fresh copy every time it launches, so a copy made
+    /// since its browser last launched, or a minute before, is kept while that
+    /// browser runs. Older copies are leftovers of earlier runs. A date that
+    /// cannot be read keeps the copy.
+    static func launchCopyMayBelongToRunningBrowser(created: Date?, browserLaunches: [Date?]) -> Bool {
+        guard !browserLaunches.isEmpty else { return false }
+        guard let created else { return true }
+        let launches = browserLaunches.compactMap { $0 }
+        guard launches.count == browserLaunches.count, let earliest = launches.min() else { return true }
+        return created >= earliest.addingTimeInterval(-60)
     }
 
     struct LaunchCopy: Equatable {

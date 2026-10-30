@@ -39,6 +39,8 @@ enum CleanerEligibilityTests {
     static var runningExecutables: [String] = []
     static func launchCopyRoot() -> String? { launchCopyFixture }
     static func runningExecutablePaths() -> [String] { runningExecutables }
+    static var browserLaunches: [String: [Date?]] = [:]
+    static func launchDates(of owner: String) -> [Date?] { browserLaunches[owner] ?? [] }
     static func isScreenshotFolderChild(_ url: URL) -> Bool {
         screenshotFolder.map { CleanerSupport.isDirectChild(url, of: $0) } ?? false
     }
@@ -195,7 +197,7 @@ enum CleanerEligibilityTests {
         let x = root.appendingPathComponent("X", isDirectory: true)
         let owner = x.appendingPathComponent("com.example.Browser.code_sign_clone", isDirectory: true)
         launchCopyFixture = x.path
-        defer { launchCopyFixture = nil; runningExecutables = [] }
+        defer { launchCopyFixture = nil; runningExecutables = []; browserLaunches = [:] }
         let original = root.appendingPathComponent("Original.bin")
         try Data((0..<600_000).map { UInt8(truncatingIfNeeded: $0 &* 31) }).write(to: original)
         func copy(_ name: String, created: Date) throws -> URL {
@@ -230,6 +232,23 @@ enum CleanerEligibilityTests {
         runningExecutables = [older.path + "/Browser.app.bundle/Contents/MacOS/Browser"]
         suite.expect(!canRemove(Item(url: older, category: .launchCopies, detail: "")),
                "a browser launched from a copy after the scan keeps it")
+        // The browser running, without saying which copy it runs from: copies
+        // made since it launched are kept, older ones are leftovers.
+        runningExecutables = []
+        browserLaunches = ["com.example.Browser": [Date(timeIntervalSinceNow: -5_000)]]
+        suite.expect(scanLaunchCopies().map(\.url.path) == [inUse.path, older.path]
+                && canRemove(Item(url: older, category: .launchCopies, detail: ""))
+                && !canRemove(Item(url: newer, category: .launchCopies, detail: "")),
+               "a copy made since its browser launched is kept even when no process names it")
+        browserLaunches = ["com.example.Browser": [nil]]
+        suite.expect(scanLaunchCopies().isEmpty && !canRemove(Item(url: older, category: .launchCopies, detail: "")),
+               "a running browser whose launch cannot be read keeps all its copies")
+        browserLaunches = [:]
+        suite.expect(CleanerSupport.launchCopyMayBelongToRunningBrowser(created: nil, browserLaunches: [Date()])
+                && !CleanerSupport.launchCopyMayBelongToRunningBrowser(created: Date(), browserLaunches: [])
+                && CleanerSupport.launchCopyMayBelongToRunningBrowser(
+                    created: Date(timeIntervalSinceNow: -30), browserLaunches: [Date()]),
+               "an unreadable date keeps a copy, a browser not running keeps none, a minute's slack before launch")
         suite.expect(!canRemove(Item(url: owner, category: .launchCopies, detail: ""))
                 && !canRemove(Item(url: owner.appendingPathComponent("unrelated"), category: .launchCopies, detail: "")),
                "only a copy itself is ever removed, never its browser's folder or anything else in it")

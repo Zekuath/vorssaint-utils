@@ -284,7 +284,10 @@ final class JunkCleaner: ObservableObject {
         // A browser launched since the scan may run from this copy now.
         if item.category == .launchCopies {
             guard let root = launchCopyRoot(), CleanerSupport.isLaunchCopy(path, root: root),
-                  !CleanerSupport.launchCopyInUse(path, executablePaths: runningExecutablePaths())
+                  !CleanerSupport.launchCopyInUse(path, executablePaths: runningExecutablePaths()),
+                  !CleanerSupport.launchCopyMayBelongToRunningBrowser(
+                    created: (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate,
+                    browserLaunches: launchDates(of: CleanerSupport.launchCopyOwner(path)))
             else { return false }
         }
         // Depth guard: anything this shallow is a root of some kind, never junk.
@@ -645,7 +648,11 @@ final class JunkCleaner: ObservableObject {
                 guard CleanerSupport.isLaunchCopy(url.path, root: root),
                       !UninstallerSupport.isSymbolicLink(url),
                       fm.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue,
-                      !CleanerSupport.launchCopyInUse(url.path, executablePaths: running) else { continue }
+                      !CleanerSupport.launchCopyInUse(url.path, executablePaths: running),
+                      !CleanerSupport.launchCopyMayBelongToRunningBrowser(
+                        created: (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate,
+                        browserLaunches: launchDates(of: CleanerSupport.launchCopyOwner(url.path)))
+                else { continue }
                 let bundle = ((try? fm.contentsOfDirectory(atPath: url.path)) ?? [])
                     .first { $0.contains(".app") }
                     .flatMap { Bundle(url: url.appendingPathComponent($0)) }
@@ -686,6 +693,11 @@ final class JunkCleaner: ObservableObject {
         let temporary = String(cString: buffer)
         guard !temporary.isEmpty else { return nil }
         return URL(fileURLWithPath: temporary).deletingLastPathComponent().appendingPathComponent("X").path
+    }
+
+    /// When each running instance of the browser `owner` names started.
+    private static func launchDates(of owner: String) -> [Date?] {
+        NSRunningApplication.runningApplications(withBundleIdentifier: owner).map(\.launchDate)
     }
 
     /// The executable of every process this user can read.
